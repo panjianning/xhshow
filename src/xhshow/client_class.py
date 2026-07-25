@@ -8,6 +8,7 @@ from typing import Any, Literal
 import requests
 
 from .client import Xhshow
+from .session import SessionManager
 
 __all__ = ["XHSClient", "NoteItem", "CommentItem"]
 
@@ -70,6 +71,7 @@ class XHSClient:
         self._cookie_str = cookie_str
         self._cookies = self._parse_cookies(cookie_str)
         self._signer = Xhshow()
+        self._session = SessionManager()
         self._last_request = 0.0
 
     # ------------------------------------------------------------------
@@ -210,6 +212,7 @@ class XHSClient:
             cookies=self._cookies,
             params=params,
             sign_format=sign_format,
+            session=self._session,
         )
         self._wait()
         resp = requests.get(uri, headers={**headers, "User-Agent": self.UA}, cookies=self._cookies, params=params, timeout=30)
@@ -223,6 +226,7 @@ class XHSClient:
             payload=payload,
             sign_format=sign_format,
             x_rap=x_rap,
+            session=self._session,
         )
         self._wait()
         resp = requests.post(uri, headers={**headers, "User-Agent": self.UA}, cookies=self._cookies, json=payload, timeout=30)
