@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import requests
 
@@ -204,7 +203,7 @@ class XHSClient:
             time.sleep(self._REQUEST_INTERVAL - elapsed)
         self._last_request = time.time()
 
-    def _get(self, path: str, params: dict[str, Any], sign_format: str = "xys") -> dict[str, Any]:
+    def _get(self, path: str, params: dict[str, Any], sign_format: Literal["xys", "xyw"] = "xys") -> dict[str, Any]:
         uri = f"{self.BASE_HOST}{path}"
         headers = self._signer.sign_headers_get(
             uri=uri,
@@ -216,7 +215,7 @@ class XHSClient:
         resp = requests.get(uri, headers={**headers, "User-Agent": self.UA}, cookies=self._cookies, params=params, timeout=30)
         return resp.json()
 
-    def _post(self, path: str, payload: dict[str, Any], x_rap: bool = False, sign_format: str = "xys") -> dict[str, Any]:
+    def _post(self, path: str, payload: dict[str, Any], x_rap: bool = False, sign_format: Literal["xys", "xyw"] = "xys") -> dict[str, Any]:
         uri = f"{self.BASE_HOST}{path}"
         headers = self._signer.sign_headers_post(
             uri=uri,
