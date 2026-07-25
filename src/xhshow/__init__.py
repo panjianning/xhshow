@@ -1,5 +1,5 @@
+from .api import CommentItem, NoteItem, XHSClient
 from .client import Xhshow
-from .client_class import CommentItem, NoteItem, XHSClient
 from .config import CryptoConfig
 from .core.crypto import CryptoProcessor
 from .session import SessionManager, SignState
