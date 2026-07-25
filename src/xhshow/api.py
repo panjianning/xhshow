@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 import time
 from collections.abc import AsyncGenerator, Generator
 from dataclasses import dataclass, field
@@ -11,7 +13,20 @@ import httpx
 from .client import Xhshow
 from .session import SessionManager
 
-__all__ = ["XHSClient", "NoteItem", "CommentItem"]
+__all__ = ["XHSClient", "NoteItem", "CommentItem", "XHSVerifyError"]
+
+
+class XHSVerifyError(Exception):
+    """Raised when XHS returns a verification challenge (HTTP 461)."""
+
+    def __init__(self, status_code: int, verify_type: str, verify_uuid: str) -> None:
+        self.status_code = status_code
+        self.verify_type = verify_type
+        self.verify_uuid = verify_uuid
+        super().__init__(
+            f"Verification required (HTTP {status_code}, verify_type={verify_type}, "
+            f"verify_uuid={verify_uuid}). Please refresh your cookie."
+        )
 
 
 # ---- Data models ----
@@ -49,11 +64,35 @@ class CommentItem:
 # ---- Internal per-account state ----
 
 class _Account:
-    __slots__ = ("cookies", "session")
+    __slots__ = ("cookies", "session", "_cookie_str", "_http")
 
     def __init__(self, cookie_str: str) -> None:
+        self._cookie_str = cookie_str
         self.cookies = _parse_cookies(cookie_str)
         self.session = SessionManager()
+        # 持久化 cookie jar：自动从 Set-Cookie 响应更新
+        self._http: httpx.AsyncClient | None = None
+
+    def _get_http(self) -> httpx.AsyncClient:
+        if self._http is None or self._http.is_closed:
+            jar = httpx.Cookies()
+            for k, v in self.cookies.items():
+                jar.set(k, v, domain="xiaohongshu.com")
+            self._http = httpx.AsyncClient(timeout=30, cookies=jar)
+        return self._http
+
+    def _sync_cookies(self) -> None:
+        """将 cookie jar 的更新同步回 _cookie_str 和 cookies dict。"""
+        if self._http is not None and not self._http.is_closed:
+            new: dict[str, str] = {}
+            for cookie in self._http.cookies.jar:
+                if cookie.name:
+                    new[cookie.name] = cookie.value
+            if new:
+                self.cookies.update(new)
+                # 重建 _cookie_str
+                parts = [f"{k}={v}" for k, v in self.cookies.items()]
+                self._cookie_str = "; ".join(parts)
 
 
 def _parse_cookies(cookie_str: str) -> dict[str, str]:
@@ -83,11 +122,28 @@ class XHSClient:
     """
 
     BASE_HOST = "https://edith.xiaohongshu.com"
+    SEARCH_HOST = "https://so.xiaohongshu.com"  # v2 搜索专用域名
     UA = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
     )
+    # 浏览器级别请求头，避免被反爬识别
+    BROWSER_HEADERS = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Origin": "https://www.xiaohongshu.com",
+        "Referer": "https://www.xiaohongshu.com/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+        "Priority": "u=1, i",
+    }
     _REQUEST_INTERVAL = 1.2
+    _last_request: float = 0.0  # class-level: shared across all instances
+    _rate_lock = asyncio.Lock()  # guards _last_request across async coroutines
 
     def __init__(self, cookies: str | list[str]) -> None:
         if isinstance(cookies, str):
@@ -97,7 +153,6 @@ class XHSClient:
         self._accounts = [_Account(c) for c in cookies]
         self._idx = 0
         self._signer = Xhshow()
-        self._last_request = 0.0
         self._lock = asyncio.Lock()  # for async round-robin
 
     # ---- account rotation ----
@@ -117,17 +172,37 @@ class XHSClient:
 
     # ---- rate limiting ----
 
-    def _wait(self) -> None:
-        elapsed = time.time() - self._last_request
-        if elapsed < self._REQUEST_INTERVAL:
-            time.sleep(self._REQUEST_INTERVAL - elapsed)
-        self._last_request = time.time()
+    @classmethod
+    def _wait(cls) -> None:
+        elapsed = time.time() - cls._last_request
+        if elapsed < cls._REQUEST_INTERVAL:
+            time.sleep(cls._REQUEST_INTERVAL - elapsed)
+        cls._last_request = time.time()
 
-    async def _wait_async(self) -> None:
-        elapsed = time.time() - self._last_request
-        if elapsed < self._REQUEST_INTERVAL:
-            await asyncio.sleep(self._REQUEST_INTERVAL - elapsed)
-        self._last_request = time.time()
+    @classmethod
+    async def _wait_async(cls) -> None:
+        async with cls._rate_lock:
+            elapsed = time.time() - cls._last_request
+            if elapsed < cls._REQUEST_INTERVAL:
+                await asyncio.sleep(cls._REQUEST_INTERVAL - elapsed)
+            cls._last_request = time.time()
+
+    # ---- response checking ----
+
+    @staticmethod
+    def _check_response(resp: httpx.Response) -> None:
+        """Raise XHSVerifyError if the response indicates a verification challenge."""
+        if resp.status_code == 461:
+            raise XHSVerifyError(
+                status_code=resp.status_code,
+                verify_type=resp.headers.get("verifytype", ""),
+                verify_uuid=resp.headers.get("verifyuuid", ""),
+            )
+        resp.raise_for_status()
+
+    @staticmethod
+    def _log(method: str, path: str, status: int, elapsed_ms: float) -> None:
+        print(f"  {method:4s} {path} → {status} ({elapsed_ms:.0f}ms)", file=sys.stderr, flush=True)
 
     # ---- HTTP helpers (sync) ----
 
@@ -138,19 +213,29 @@ class XHSClient:
             uri=uri, cookies=acct.cookies, params=params, sign_format=sign_format, session=acct.session,
         )
         self._wait()
+        t0 = time.time()
         with httpx.Client(timeout=30) as http:
             resp = http.get(uri, headers={**headers, "User-Agent": self.UA}, params=params, cookies=acct.cookies)
+        self._log("GET", path, resp.status_code, (time.time() - t0) * 1000)
+        self._check_response(resp)
         return resp.json()
 
-    def _post(self, path: str, payload: dict[str, Any], x_rap: bool = False, sign_format: Literal["xys", "xyw"] = "xys") -> dict[str, Any]:
+    def _post(self, path: str, payload: dict[str, Any], x_rap: bool = False, sign_format: Literal["xys", "xyw"] = "xys", *, host: str | None = None) -> dict[str, Any]:
         acct = self._next()
-        uri = f"{self.BASE_HOST}{path}"
+        uri = f"{host or self.BASE_HOST}{path}"
         headers = self._signer.sign_headers_post(
             uri=uri, cookies=acct.cookies, payload=payload, sign_format=sign_format, session=acct.session, x_rap=x_rap,
         )
+        headers.update(self.BROWSER_HEADERS)
+        headers["Content-Type"] = "application/json;charset=UTF-8"
+        headers["Cookie"] = acct._cookie_str
         self._wait()
+        t0 = time.time()
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         with httpx.Client(timeout=30) as http:
-            resp = http.post(uri, headers={**headers, "User-Agent": self.UA}, json=payload, cookies=acct.cookies)
+            resp = http.post(uri, headers={**headers, "User-Agent": self.UA}, content=body)
+        self._log("POST", path, resp.status_code, (time.time() - t0) * 1000)
+        self._check_response(resp)
         return resp.json()
 
     # ---- HTTP helpers (async) ----
@@ -162,19 +247,30 @@ class XHSClient:
             uri=uri, cookies=acct.cookies, params=params, sign_format=sign_format, session=acct.session,
         )
         await self._wait_async()
+        t0 = time.time()
         async with httpx.AsyncClient(timeout=30) as http:
             resp = await http.get(uri, headers={**headers, "User-Agent": self.UA}, params=params, cookies=acct.cookies)
+        self._log("GET", path, resp.status_code, (time.time() - t0) * 1000)
+        self._check_response(resp)
         return resp.json()
 
-    async def _post_async(self, path: str, payload: dict[str, Any], x_rap: bool = False, sign_format: Literal["xys", "xyw"] = "xys") -> dict[str, Any]:
+    async def _post_async(self, path: str, payload: dict[str, Any], x_rap: bool = False, sign_format: Literal["xys", "xyw"] = "xys", *, host: str | None = None) -> dict[str, Any]:
         acct = await self._next_async()
-        uri = f"{self.BASE_HOST}{path}"
+        uri = f"{host or self.BASE_HOST}{path}"
         headers = self._signer.sign_headers_post(
             uri=uri, cookies=acct.cookies, payload=payload, sign_format=sign_format, session=acct.session, x_rap=x_rap,
         )
+        headers.update(self.BROWSER_HEADERS)
+        headers["Content-Type"] = "application/json;charset=UTF-8"
+        headers["Cookie"] = acct._cookie_str
         await self._wait_async()
-        async with httpx.AsyncClient(timeout=30) as http:
-            resp = await http.post(uri, headers={**headers, "User-Agent": self.UA}, json=payload, cookies=acct.cookies)
+        t0 = time.time()
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        http = acct._get_http()
+        resp = await http.post(uri, headers={**headers, "User-Agent": self.UA}, content=body)
+        acct._sync_cookies()
+        self._log("POST", path, resp.status_code, (time.time() - t0) * 1000)
+        self._check_response(resp)
         return resp.json()
 
     # ==================================================================
@@ -190,16 +286,34 @@ class XHSClient:
         return _parse_note_list(data)
 
     def search_notes(self, keyword: str, page_size: int = 20, sort: str = "general", note_type: int = 0) -> Generator[NoteItem, None, None]:
+        """搜索笔记；统一使用浏览器实际使用的 so.xiaohongshu.com v2 接口。"""
+        yield from self.search_notes_v2(keyword, page_size, sort, note_type)
+
+    def search_notes_v2(self, keyword: str, page_size: int = 20, sort: str = "general", note_type: int = 0) -> Generator[NoteItem, None, None]:
+        """v2 搜索 (so.xiaohongshu.com)，推荐使用，默认启用。"""
+        import uuid
         page = 1
         has_more = True
+        session_id = str(uuid.uuid4())
+        search_id = self._signer.get_search_id()
         while has_more:
             payload = {
                 "keyword": keyword, "page": page, "page_size": page_size,
-                "search_id": self._signer.get_search_id(), "sort": sort, "note_type": note_type,
+                "search_id": search_id,
+                "sort": sort, "note_type": note_type,
+                "ext_flags": [],
+                "geo": "",
+                "image_formats": ["jpg", "webp", "avif"],
+                "message_id": "sending",
+                "session_id": session_id,
             }
-            data = self._post("/api/sns/web/v1/search/notes", payload, x_rap=True)
-            yield from _parse_note_list(data)
-            has_more = (data.get("data") or {}).get("has_more", False)
+            data = self._post(
+                "/api/sns/web/v2/search/notes", payload, x_rap=True, host=self.SEARCH_HOST,
+            )
+            items = _parse_note_list(data)
+            for item in items:
+                yield item
+            has_more = bool((data.get("data") or {}).get("has_more", False)) and bool(items)
             page += 1
 
     def get_note_detail(self, note: NoteItem | str, xsec_token: str | None = None) -> dict[str, Any]:
@@ -247,17 +361,35 @@ class XHSClient:
         return _parse_note_list(data)
 
     async def search_notes_async(self, keyword: str, page_size: int = 20, sort: str = "general", note_type: int = 0) -> AsyncGenerator[NoteItem, None]:
+        """异步搜索；统一使用 v2 接口。"""
+        async for item in self.search_notes_v2_async(keyword, page_size, sort, note_type):
+            yield item
+
+    async def search_notes_v2_async(self, keyword: str, page_size: int = 20, sort: str = "general", note_type: int = 0) -> AsyncGenerator[NoteItem, None]:
+        """v2 搜索 (so.xiaohongshu.com)，推荐使用，默认启用。"""
+        import uuid
         page = 1
         has_more = True
+        session_id = str(uuid.uuid4())
+        search_id = self._signer.get_search_id()
         while has_more:
             payload = {
                 "keyword": keyword, "page": page, "page_size": page_size,
-                "search_id": self._signer.get_search_id(), "sort": sort, "note_type": note_type,
+                "search_id": search_id,
+                "sort": sort, "note_type": note_type,
+                "ext_flags": [],
+                "geo": "",
+                "image_formats": ["jpg", "webp", "avif"],
+                "message_id": "sending",
+                "session_id": session_id,
             }
-            data = await self._post_async("/api/sns/web/v1/search/notes", payload, x_rap=True)
-            for item in _parse_note_list(data):
+            data = await self._post_async(
+                "/api/sns/web/v2/search/notes", payload, x_rap=True, host=self.SEARCH_HOST,
+            )
+            items = _parse_note_list(data)
+            for item in items:
                 yield item
-            has_more = (data.get("data") or {}).get("has_more", False)
+            has_more = bool((data.get("data") or {}).get("has_more", False)) and bool(items)
             page += 1
 
     async def get_note_detail_async(self, note: NoteItem | str, xsec_token: str | None = None) -> dict[str, Any]:

@@ -1,6 +1,6 @@
 from urllib.parse import urlparse
 
-__all__ = ["extract_uri", "build_url", "extract_api_path"]
+__all__ = ["extract_uri", "build_url", "extract_api_path", "extract_host"]
 
 
 def extract_api_path(uri_with_data: str) -> str:
@@ -75,6 +75,29 @@ def extract_uri(url: str) -> str:
         raise ValueError(f"Cannot extract valid URI path from URL: {url}")
 
     return path
+
+
+def extract_host(url: str) -> str:
+    """
+    Extract the host (scheme + hostname) from a full URL.
+
+    Args:
+        url: Full URL like "https://so.xiaohongshu.com/api/sns/web/v2/search/notes"
+
+    Returns:
+        str: Host with scheme, e.g. "https://so.xiaohongshu.com"
+
+    Examples:
+        >>> extract_host("https://so.xiaohongshu.com/api/sns/web/v2/search/notes")
+        'https://so.xiaohongshu.com'
+        >>> extract_host("/api/sns/web/v1/homefeed")
+        'https://edith.xiaohongshu.com'
+    """
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    # Relative path — default to edith
+    return "https://edith.xiaohongshu.com"
 
 
 def build_url(base_url: str, params: dict | None = None) -> str:

@@ -13,7 +13,7 @@ from .core.xyw_crypto import build_xyw_payload_hex
 from .session import SessionManager, SignState
 from .utils.random_gen import RandomGenerator
 from .utils.sharding import get_sharding_key
-from .utils.url_utils import build_url, extract_uri
+from .utils.url_utils import build_url, extract_host, extract_uri
 from .utils.validators import (
     validate_get_signature_params,
     validate_post_signature_params,
@@ -628,7 +628,8 @@ class Xhshow:
 
         if x_rap:
             rap_uri = extract_uri(uri)
-            rap_api = "//edith.xiaohongshu.com" + rap_uri
+            rap_host = extract_host(uri).replace("https://", "//").replace("http://", "//")
+            rap_api = rap_host + rap_uri
             rap_data = request_data or {}
             headers["x-rap-param"] = x_rap_param(rap_api, rap_data)
 
