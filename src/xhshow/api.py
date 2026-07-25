@@ -199,7 +199,7 @@ class XHSClient:
             }
             data = self._post("/api/sns/web/v1/search/notes", payload, x_rap=True)
             yield from _parse_note_list(data)
-            has_more = data.get("data", {}).get("has_more", False)
+            has_more = (data.get("data") or {}).get("has_more", False)
             page += 1
 
     def get_note_detail(self, note: NoteItem | str, xsec_token: str | None = None) -> dict[str, Any]:
@@ -218,7 +218,7 @@ class XHSClient:
         has_more = True
         while has_more:
             data = self._get("/api/sns/web/v2/comment/page", {"note_id": note_id, "cursor": cursor, "xsec_token": token})
-            cd = data.get("data", {})
+            cd = data.get("data") or {}
             for c in cd.get("comments", []):
                 item = _parse_comment(c)
                 if expand_sub and c.get("sub_comment_has_more"):
@@ -257,7 +257,7 @@ class XHSClient:
             data = await self._post_async("/api/sns/web/v1/search/notes", payload, x_rap=True)
             for item in _parse_note_list(data):
                 yield item
-            has_more = data.get("data", {}).get("has_more", False)
+            has_more = (data.get("data") or {}).get("has_more", False)
             page += 1
 
     async def get_note_detail_async(self, note: NoteItem | str, xsec_token: str | None = None) -> dict[str, Any]:
@@ -276,7 +276,7 @@ class XHSClient:
         has_more = True
         while has_more:
             data = await self._get_async("/api/sns/web/v2/comment/page", {"note_id": note_id, "cursor": cursor, "xsec_token": token})
-            cd = data.get("data", {})
+            cd = data.get("data") or {}
             for c in cd.get("comments", []):
                 item = _parse_comment(c)
                 if expand_sub and c.get("sub_comment_has_more"):
@@ -287,7 +287,7 @@ class XHSClient:
 
     async def get_user_info_async(self, user_id: str) -> dict[str, Any]:
         data = await self._get_async("/api/sns/web/v1/user/otherinfo", {"target_user_id": user_id})
-        return data.get("data", {})
+        return (data.get("data") or {})
 
     async def get_user_notes_async(self, user_id: str, count: int = 30) -> list[NoteItem]:
         data = await self._get_async("/api/sns/web/v1/user_posted", {"num": str(count), "cursor": "", "user_id": user_id}, sign_format="xyw")
@@ -302,10 +302,10 @@ class XHSClient:
             data = self._get("/api/sns/web/v2/comment/sub/page", {
                 "note_id": note_id, "root_comment_id": root_id, "num": 10, "cursor": cursor, "xsec_token": xsec_token,
             })
-            for sc in data.get("data", {}).get("comments", []):
+            for sc in (data.get("data") or {}).get("comments", []):
                 yield _parse_comment(sc)
-            has_more = data.get("data", {}).get("has_more", False)
-            cursor = data.get("data", {}).get("cursor", "")
+            has_more = (data.get("data") or {}).get("has_more", False)
+            cursor = (data.get("data") or {}).get("cursor", "")
             page += 1
 
     async def _expand_sub_comments_async(self, note_id: str, root_id: str, cursor: str, xsec_token: str, max_pages: int) -> AsyncGenerator[CommentItem, None]:
@@ -315,10 +315,10 @@ class XHSClient:
             data = await self._get_async("/api/sns/web/v2/comment/sub/page", {
                 "note_id": note_id, "root_comment_id": root_id, "num": 10, "cursor": cursor, "xsec_token": xsec_token,
             })
-            for sc in data.get("data", {}).get("comments", []):
+            for sc in (data.get("data") or {}).get("comments", []):
                 yield _parse_comment(sc)
-            has_more = data.get("data", {}).get("has_more", False)
-            cursor = data.get("data", {}).get("cursor", "")
+            has_more = (data.get("data") or {}).get("has_more", False)
+            cursor = (data.get("data") or {}).get("cursor", "")
             page += 1
 
 
@@ -350,7 +350,7 @@ def _parse_comment(c: dict[str, Any]) -> CommentItem:
 
 def _parse_note_list(data: dict[str, Any]) -> list[NoteItem]:
     items = []
-    for item in data.get("data", {}).get("items", []) or data.get("data", {}).get("notes", []):
+    for item in (data.get("data") or {}).get("items", []) or (data.get("data") or {}).get("notes", []):
         card = item.get("note_card", {}) or item
         info = card.get("interact_info", {}) or {}
         user = card.get("user", {}) or {}
