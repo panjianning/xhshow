@@ -13,8 +13,10 @@ class CryptoConfig:
     GID_URL = "https://as.xiaohongshu.com/api/sec/v1/shield/webprofile"
     DATA_PALTFORM = "Windows"
     DATA_SVN = "2"
-    DATA_SDK_VERSION = "4.3.5"
-    DATA_webBuild = "6.3.0"
+    # Current xhs-pc-web values observed from the 6.34.x web client.
+    # Keep these together: they are embedded in x-s-common and must match.
+    DATA_SDK_VERSION = "4.3.7"
+    DATA_webBuild = "6.34.5"
 
     # Bitwise operation constants
     MAX_32BIT: int = 0xFFFFFFFF
@@ -122,13 +124,13 @@ class CryptoConfig:
 
     SIGNATURE_XSCOMMON_TEMPLATE: dict[str, Any] = field(
         default_factory=lambda: {
-            "s0": 5,
+            "s0": 3,
             "s1": "",
             "x0": "1",
-            "x1": "4.3.5",
-            "x2": "Windows",
+            "x1": "4.3.7",
+            "x2": "Mac OS",
             "x3": "xhs-pc-web",
-            "x4": "4.86.0",
+            "x4": "6.34.5",
             "x5": "",
             "x6": "",
             "x7": "",
@@ -136,12 +138,15 @@ class CryptoConfig:
             "x9": -596800761,
             "x10": 0,
             "x11": "normal",
+            # x12 is the semicolon-separated dsllt/tiga state maintained by
+            # the web security runtime. It is optional for offline signing.
+            "x12": "",
         }
     )
 
     PUBLIC_USERAGENT: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0"
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/142.0.7444.265 Safari/537.36"
     )
 
     def with_overrides(self, **kwargs: Any) -> "CryptoConfig":
