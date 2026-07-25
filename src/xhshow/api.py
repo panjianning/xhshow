@@ -45,6 +45,7 @@ class NoteItem:
     comment_count: int = 0
     xsec_token: str = ""
     image_count: int = 0
+    posted_at: int = 0  # 发布时间，Unix 毫秒时间戳（由 note_id 前 8 位解析）
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
@@ -480,6 +481,14 @@ def _parse_comment(c: dict[str, Any]) -> CommentItem:
     )
 
 
+def _note_id_timestamp_ms(note_id: str) -> int:
+    """从小红书笔记 ID 前 8 位解析精确发布时间。"""
+    try:
+        return int(note_id[:8], 16) * 1000
+    except (TypeError, ValueError):
+        return 0
+
+
 def _parse_note_list(data: dict[str, Any]) -> list[NoteItem]:
     items = []
     for item in (data.get("data") or {}).get("items", []) or (data.get("data") or {}).get("notes", []):
@@ -497,6 +506,7 @@ def _parse_note_list(data: dict[str, Any]) -> list[NoteItem]:
             comment_count=info.get("comment_count", 0),
             xsec_token=item.get("xsec_token", ""),
             image_count=len(card.get("image_list", []) or []),
+            posted_at=_note_id_timestamp_ms(item.get("id") or card.get("note_id", "")),
             raw=card,
         ))
     return items
