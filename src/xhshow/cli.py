@@ -265,6 +265,8 @@ def cmd_search(args: argparse.Namespace, client: Any) -> None:
 
 
 def cmd_detail(args: argparse.Namespace, client: Any) -> None:
+    from .api import _extract_image_urls
+
     note_id, token = _require_token(args, args.note)
     card = client.get_note_detail(note_id, xsec_token=token)
     if not card:
@@ -286,6 +288,12 @@ def cmd_detail(args: argparse.Namespace, client: Any) -> None:
     print(f"图片   : {len(card.get('image_list') or [])} 张   类型: {card.get('type', '')}")
     if tags:
         print("标签   : " + ", ".join(tags))
+    if args.images:
+        urls = _extract_image_urls(card)
+        if urls:
+            print("图片链接:")
+            for i, url in enumerate(urls, 1):
+                print(f"  [{i}] {url}")
     desc = (card.get("desc") or "").strip()
     if desc:
         print("\n" + desc)
@@ -389,6 +397,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("detail", parents=[common_sub], help="笔记详情(需要 xsec_token)")
     p.add_argument("note", help="笔记 id 或小红书链接(自动提取 xsec_token)")
     p.add_argument("--xsec-token", help="xsec_token(传链接时可省略)")
+    p.add_argument("--images", action="store_true", help="列出图片链接(WB_DFT 默认场景图)")
     p.set_defaults(func=cmd_detail)
 
     p = sub.add_parser("comments", parents=[common_sub], help="笔记评论(需要 xsec_token)")

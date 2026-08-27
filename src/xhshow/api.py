@@ -546,18 +546,24 @@ def _note_id_timestamp_ms(note_id: str) -> int:
 
 
 def _extract_image_urls(card: dict[str, Any]) -> list[str]:
-    """Extract default image URLs from search/feed note cards."""
+    """Extract default image URLs from search/feed note cards.
+
+    兼容两种结构:
+    - 搜索/推荐流: image.info_list[](image_scene=WB_DFT) 或 image.url_default
+    - 笔记详情(feed): image.url 直接就是默认图
+    """
     urls: list[str] = []
     for image in card.get("image_list", []) or []:
+        url = None
         for info in image.get("info_list", []) or []:
-            url = info.get("url")
-            if url and info.get("image_scene") == "WB_DFT":
-                urls.append(url)
+            u = info.get("url")
+            if u and info.get("image_scene") == "WB_DFT":
+                url = u
                 break
-        else:
-            url = image.get("url_default")
-            if url:
-                urls.append(url)
+        if not url:
+            url = image.get("url_default") or image.get("url")
+        if url:
+            urls.append(url)
     return urls
 
 
