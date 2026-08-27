@@ -2,10 +2,8 @@
 
 <div align="center">
 
-[![PyPI version](https://badge.fury.io/py/xhshow.svg)](https://badge.fury.io/py/xhshow)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://pypi.org/project/xhshow/)
-[![License](https://img.shields.io/github/license/Cloxl/xhshow.svg)](https://github.com/Cloxl/xhshow/blob/main/LICENSE)
-[![Downloads](https://pepy.tech/badge/xhshow)](https://pepy.tech/project/xhshow)
+[![License](https://img.shields.io/github/license/panjianning/xhshow.svg)](https://github.com/panjianning/xhshow/blob/main/LICENSE)
 
 小红书请求签名生成库 + 开箱即用的命令行工具 `xhs-cli`
 
@@ -24,9 +22,20 @@
 
 ## 安装
 
+从 GitHub 直接安装（无需发布 PyPI）：
+
 ```bash
-pip install xhshow            # 仅签名库
-pip install 'xhshow[cli]'     # 带 xhs-cli 命令行工具
+# 仅签名库
+pip install "git+https://github.com/panjianning/xhshow.git"
+
+# 带 xhs-cli 命令行工具（推荐）
+pip install "git+https://github.com/panjianning/xhshow.git[cli]"
+```
+
+SSH 方式：
+
+```bash
+pip install "git+ssh://git@github.com/panjianning/xhshow.git[cli]"
 ```
 
 从源码安装（开发）：
@@ -314,7 +323,7 @@ client = Xhshow(config=config)
 ```bash
 # 安装 uv 后
 git clone https://github.com/panjianning/xhshow && cd xhshow
-uv sync --dev
+uv sync --extra cli --extra dev
 
 uv run pytest tests/ -v                                  # 测试
 uv run ruff check src/ tests/ --ignore=UP036,E501        # 检查
@@ -326,7 +335,7 @@ uv build                                                 # 构建
 
 ## 功能建议
 
-如果您有任何功能建议或想法，欢迎在 [#60](https://github.com/Cloxl/xhshow/issues/60) 中提交。我们期待您的宝贵建议，共同打造更好的 xhshow！
+如果您有任何功能建议或想法，欢迎在 [Issues](https://github.com/panjianning/xhshow/issues) 中提交。我们期待您的宝贵建议，共同打造更好的 xhshow！
 
 ## 社区
 
