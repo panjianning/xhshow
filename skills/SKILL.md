@@ -16,15 +16,17 @@ description: 拉取小红书数据的命令行工具与 Python 库（搜索/笔�
 从 GitHub 直接安装（未发布 PyPI，**不要** `pip install xhshow`，那是上游包没有 CLI）：
 
 ```bash
-# 带 xhs-cli 命令行工具（推荐）
-pip install "git+https://github.com/panjianning/xhshow.git[cli]"
+# 带 xhs-cli 命令行工具（推荐, extras 写在包名后、@ 前, PEP 508 语法）
+pip install "xhshow[cli] @ git+https://github.com/panjianning/xhshow.git"
 
 # SSH 方式
-pip install "git+ssh://git@github.com/panjianning/xhshow.git[cli]"
+pip install "xhshow[cli] @ git+ssh://git@github.com/panjianning/xhshow.git"
 
 # 仅签名库（不含 CLI）
 pip install "git+https://github.com/panjianning/xhshow.git"
 ```
+
+> ⚠️ 不能写 `git+https://...git[cli]`：pip 会把 `[cli]` 当作仓库路径传给 git，报 `repository not found`。
 
 开发模式（本仓库内）：
 

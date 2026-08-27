@@ -28,14 +28,16 @@
 # 仅签名库
 pip install "git+https://github.com/panjianning/xhshow.git"
 
-# 带 xhs-cli 命令行工具（推荐）
-pip install "git+https://github.com/panjianning/xhshow.git[cli]"
+# 带 xhs-cli 命令行工具（推荐, 注意 extras 要写在包名后, @ 前）
+pip install "xhshow[cli] @ git+https://github.com/panjianning/xhshow.git"
 ```
+
+> ⚠️ 不能写 `git+https://...git[cli]` —— pip 会把 `[cli]` 当成仓库路径传给 git, 导致 `repository not found`。extras 必须用 PEP 508 直接引用语法: `包名[extras] @ git+URL`。
 
 SSH 方式：
 
 ```bash
-pip install "git+ssh://git@github.com/panjianning/xhshow.git[cli]"
+pip install "xhshow[cli] @ git+ssh://git@github.com/panjianning/xhshow.git"
 ```
 
 从源码安装（开发）：
