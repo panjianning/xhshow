@@ -4,7 +4,7 @@ import asyncio
 import json
 import sys
 import time
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -13,7 +13,11 @@ import httpx
 from .client import Xhshow
 from .session import SessionManager
 
-__all__ = ["XHSClient", "NoteItem", "CommentItem", "XHSVerifyError"]
+__all__ = ["XHSClient", "NoteItem", "CommentItem", "XHSVerifyError", "AllCookiesInvalidError"]
+
+
+class AllCookiesInvalidError(Exception):
+    """Raised when every account's cookie has been marked invalid."""
 
 
 class XHSVerifyError(Exception):
@@ -46,6 +50,7 @@ class NoteItem:
     xsec_token: str = ""
     image_count: int = 0
     posted_at: int = 0  # 发布时间，Unix 毫秒时间戳（由 note_id 前 8 位解析）
+    image_urls: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
@@ -64,13 +69,18 @@ class CommentItem:
 
 # ---- Internal per-account state ----
 
+# 业务返回码: cookie 失效(登录已过期)时剔除该账号并换下一个
+INVALID_COOKIE_CODES: set[int] = {-100}
+
+
 class _Account:
-    __slots__ = ("cookies", "session", "_cookie_str", "_http")
+    __slots__ = ("cookies", "session", "_cookie_str", "_http", "invalid")
 
     def __init__(self, cookie_str: str) -> None:
         self._cookie_str = cookie_str
         self.cookies = _parse_cookies(cookie_str)
         self.session = SessionManager()
+        self.invalid = False  # cookie 失效标记(检测到登录已过期后置位)
         # 持久化 cookie jar：自动从 Set-Cookie 响应更新
         self._http: httpx.AsyncClient | None = None
 
@@ -146,7 +156,7 @@ class XHSClient:
     _last_request: float = 0.0  # class-level: shared across all instances
     _rate_lock = asyncio.Lock()  # guards _last_request across async coroutines
 
-    def __init__(self, cookies: str | list[str]) -> None:
+    def __init__(self, cookies: str | list[str], on_cookie_invalid: Callable[[str], None] | None = None) -> None:
         if isinstance(cookies, str):
             cookies = [cookies]
         if not cookies:
@@ -155,21 +165,31 @@ class XHSClient:
         self._idx = 0
         self._signer = Xhshow()
         self._lock = asyncio.Lock()  # for async round-robin
+        # 某个账号 cookie 失效(登录已过期)时回调, 参数为失效的 cookie 字符串
+        self._on_cookie_invalid = on_cookie_invalid
 
     # ---- account rotation ----
 
     def _next(self) -> _Account:
-        """Round-robin to next account (sync)."""
-        acct = self._accounts[self._idx]
-        self._idx = (self._idx + 1) % len(self._accounts)
-        return acct
+        """Round-robin to next valid account; raise if all invalid."""
+        n = len(self._accounts)
+        for _ in range(n):
+            acct = self._accounts[self._idx]
+            self._idx = (self._idx + 1) % n
+            if not acct.invalid:
+                return acct
+        raise AllCookiesInvalidError("所有账号的 cookie 均已失效")
 
     async def _next_async(self) -> _Account:
-        """Round-robin to next account (async, thread-safe)."""
+        """Round-robin to next valid account (async, thread-safe)."""
         async with self._lock:
-            acct = self._accounts[self._idx]
-            self._idx = (self._idx + 1) % len(self._accounts)
-        return acct
+            n = len(self._accounts)
+            for _ in range(n):
+                acct = self._accounts[self._idx]
+                self._idx = (self._idx + 1) % n
+                if not acct.invalid:
+                    return acct
+        raise AllCookiesInvalidError("所有账号的 cookie 均已失效")
 
     # ---- rate limiting ----
 
@@ -207,6 +227,13 @@ class XHSClient:
 
     # ---- HTTP helpers (sync) ----
 
+    def _mark_invalid(self, acct: _Account, path: str, code: int) -> None:
+        """标记账号 cookie 失效, 触发回调并打印提示。"""
+        acct.invalid = True
+        if self._on_cookie_invalid:
+            self._on_cookie_invalid(acct._cookie_str)
+        print(f"  ⚠️ 账号 cookie 已失效(code={code}), 尝试切换下一账号 ({path})", file=sys.stderr, flush=True)
+
     def _get(self, path: str, params: dict[str, Any], sign_format: Literal["xys", "xyw"] = "xys") -> dict[str, Any]:
         acct = self._next()
         uri = f"{self.BASE_HOST}{path}"
@@ -219,7 +246,12 @@ class XHSClient:
             resp = http.get(uri, headers={**headers, "User-Agent": self.UA}, params=params, cookies=acct.cookies)
         self._log("GET", path, resp.status_code, (time.time() - t0) * 1000)
         self._check_response(resp)
-        return resp.json()
+        data = resp.json()
+        code = data.get("code")
+        if code in INVALID_COOKIE_CODES:
+            self._mark_invalid(acct, path, code)
+            return self._get(path, params, sign_format)  # 换下一有效账号重试
+        return data
 
     def _post(self, path: str, payload: dict[str, Any], x_rap: bool = False, sign_format: Literal["xys", "xyw"] = "xys", *, host: str | None = None) -> dict[str, Any]:
         acct = self._next()
@@ -237,7 +269,12 @@ class XHSClient:
             resp = http.post(uri, headers={**headers, "User-Agent": self.UA}, content=body)
         self._log("POST", path, resp.status_code, (time.time() - t0) * 1000)
         self._check_response(resp)
-        return resp.json()
+        data = resp.json()
+        code = data.get("code")
+        if code in INVALID_COOKIE_CODES:
+            self._mark_invalid(acct, path, code)
+            return self._post(path, payload, x_rap, sign_format, host=host)  # 换下一有效账号重试
+        return data
 
     # ---- HTTP helpers (async) ----
 
@@ -253,7 +290,12 @@ class XHSClient:
             resp = await http.get(uri, headers={**headers, "User-Agent": self.UA}, params=params, cookies=acct.cookies)
         self._log("GET", path, resp.status_code, (time.time() - t0) * 1000)
         self._check_response(resp)
-        return resp.json()
+        data = resp.json()
+        code = data.get("code")
+        if code in INVALID_COOKIE_CODES:
+            self._mark_invalid(acct, path, code)
+            return await self._get_async(path, params, sign_format)  # 换下一有效账号重试
+        return data
 
     async def _post_async(self, path: str, payload: dict[str, Any], x_rap: bool = False, sign_format: Literal["xys", "xyw"] = "xys", *, host: str | None = None) -> dict[str, Any]:
         acct = await self._next_async()
@@ -272,7 +314,12 @@ class XHSClient:
         acct._sync_cookies()
         self._log("POST", path, resp.status_code, (time.time() - t0) * 1000)
         self._check_response(resp)
-        return resp.json()
+        data = resp.json()
+        code = data.get("code")
+        if code in INVALID_COOKIE_CODES:
+            self._mark_invalid(acct, path, code)
+            return await self._post_async(path, payload, x_rap, sign_format, host=host)  # 换下一有效账号重试
+        return data
 
     # ==================================================================
     # Public API — sync
@@ -341,6 +388,10 @@ class XHSClient:
                 yield item
             has_more = cd.get("has_more", False)
             cursor = cd.get("cursor", "")
+
+    def me(self) -> dict[str, Any]:
+        """当前登录账号信息 (user/me)。"""
+        return self._get("/api/sns/web/v1/user/me", {}).get("data", {})
 
     def get_user_info(self, user_id: str) -> dict[str, Any]:
         return self._get("/api/sns/web/v1/user/otherinfo", {"target_user_id": user_id}).get("data", {})
@@ -418,6 +469,11 @@ class XHSClient:
             has_more = cd.get("has_more", False)
             cursor = cd.get("cursor", "")
 
+    async def me_async(self) -> dict[str, Any]:
+        """当前登录账号信息 (user/me, 异步)。"""
+        data = await self._get_async("/api/sns/web/v1/user/me", {})
+        return (data.get("data") or {})
+
     async def get_user_info_async(self, user_id: str) -> dict[str, Any]:
         data = await self._get_async("/api/sns/web/v1/user/otherinfo", {"target_user_id": user_id})
         return (data.get("data") or {})
@@ -489,6 +545,22 @@ def _note_id_timestamp_ms(note_id: str) -> int:
         return 0
 
 
+def _extract_image_urls(card: dict[str, Any]) -> list[str]:
+    """Extract default image URLs from search/feed note cards."""
+    urls: list[str] = []
+    for image in card.get("image_list", []) or []:
+        for info in image.get("info_list", []) or []:
+            url = info.get("url")
+            if url and info.get("image_scene") == "WB_DFT":
+                urls.append(url)
+                break
+        else:
+            url = image.get("url_default")
+            if url:
+                urls.append(url)
+    return urls
+
+
 def _parse_note_list(data: dict[str, Any]) -> list[NoteItem]:
     items = []
     for item in (data.get("data") or {}).get("items", []) or (data.get("data") or {}).get("notes", []):
@@ -507,6 +579,7 @@ def _parse_note_list(data: dict[str, Any]) -> list[NoteItem]:
             xsec_token=item.get("xsec_token", ""),
             image_count=len(card.get("image_list", []) or []),
             posted_at=_note_id_timestamp_ms(item.get("id") or card.get("note_id", "")),
+            image_urls=_extract_image_urls(card),
             raw=card,
         ))
     return items
