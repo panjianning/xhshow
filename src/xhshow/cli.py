@@ -264,6 +264,57 @@ def cmd_search(args: argparse.Namespace, client: Any) -> None:
     _print_notes(notes, args.json)
 
 
+def _detail_to_json(card: dict[str, Any], note_id: str, xsec_token: str) -> dict[str, Any]:
+    """把详情 card 归一化为固定 schema 的 dict。
+
+    字段对齐外部消费方约定的结构:
+    note_id / xsec_token / title / desc / type / url /
+    author / author_id / likes / comments / collects / shares /
+    tags / images / created_time / last_update_time / ip_location
+    """
+    from .api import _extract_image_urls
+
+    user = card.get("user") or {}
+    inter = card.get("interact_info") or {}
+    tags = [t.get("name", "") for t in (card.get("tag_list") or []) if t.get("name")]
+    images = _extract_image_urls(card)
+
+    def _ms(ts: Any) -> int:
+        """时间戳(秒或毫秒) → 毫秒, 取不到返回 0。"""
+        try:
+            t = int(ts)
+            if t and t < 10**12:
+                t *= 1000
+            return t
+        except (TypeError, ValueError):
+            return 0
+
+    def _str(n: Any) -> str:
+        return str(n) if n is not None else "0"
+
+    url = f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token={xsec_token}&xsec_source="
+
+    return {
+        "note_id": card.get("note_id", note_id),
+        "xsec_token": xsec_token,
+        "title": card.get("title") or "",
+        "desc": card.get("desc") or "",
+        "type": card.get("type") or "",
+        "url": url,
+        "author": user.get("nickname", "") or "",
+        "author_id": user.get("user_id", "") or "",
+        "likes": _str(inter.get("liked_count", 0)),
+        "comments": _str(inter.get("comment_count", 0)),
+        "collects": _str(inter.get("collected_count", 0)),
+        "shares": _str(inter.get("share_count", 0)),
+        "tags": tags,
+        "images": images,
+        "created_time": _ms(card.get("time")),
+        "last_update_time": _ms(card.get("last_update_time")),
+        "ip_location": card.get("ip_location") or "",
+    }
+
+
 def cmd_detail(args: argparse.Namespace, client: Any) -> None:
     from .api import _extract_image_urls
 
@@ -272,7 +323,7 @@ def cmd_detail(args: argparse.Namespace, client: Any) -> None:
     if not card:
         raise SystemExit("未获取到详情(可能被风控或链接失效)")
     if args.json:
-        print(json.dumps(card, ensure_ascii=False, indent=2))
+        print(json.dumps(_detail_to_json(card, note_id, token or ""), ensure_ascii=False, indent=2))
         return
     user = card.get("user") or {}
     inter = card.get("interact_info") or {}
