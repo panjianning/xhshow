@@ -39,9 +39,15 @@ client = [
 cli = [
     "httpx>=0.27",
 ]
+serve = [
+    "httpx>=0.27",
+    "fastapi>=0.110",
+    "uvicorn>=0.30",
+]
 
 [project.scripts]
 xhs-cli = "xhshow.cli:main"
+xhs-serve = "xhshow.server:main"
 
 [project.urls]
 Homepage = "https://github.com/cloxl/xhshow"
@@ -99,4 +105,9 @@ dev = [
 ]
 client = [
     "httpx>=0.27",
+]
+serve = [
+    "httpx>=0.27",
+    "fastapi>=0.110",
+    "uvicorn>=0.30",
 ]

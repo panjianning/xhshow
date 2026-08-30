@@ -16,6 +16,7 @@
 - **`xhs-cli` 命令行工具**：一条命令拉首页推荐 / 搜索 / 笔记详情 / 评论 / 用户主页
 - **多账号 round-robin**：配置文件里每行一个 cookie = 一个账号，自动轮询分摊风控
 - **cookie 失效自动处理**：检测到登录过期自动剔除该账号、换下一个有效账号；全部失效给出明确报错
+- **远端 Cookie API**：`--cookie-api` 从远端接口拉取多账号 cookie（适合服务端统一管理），失效自动回调通知远端
 - **细节友好**：`--json` 输出、链接自动提取 `xsec_token`、`xhs-cli set-cookie` 一条命令配好
 
 ---
@@ -68,6 +69,29 @@ xhs-cli cookie clear       # 清空所有
 
 > 也可通过 `--cookie` / `--cookie-file` / 环境变量 `XHS_COOKIE` 临时指定，优先级高于配置文件。
 
+#### 远端 Cookie API（服务端统一管理）
+
+Cookie 存在远端服务（如你的业务平台数据库）时，用 `--cookie-api` 指定接口地址，无需本地配置文件：
+
+```bash
+xhs-cli --cookie-api http://your-server:8080/api/xhs whoami
+# 接口需要鉴权时，传入密钥（请求携带 Authorization: Bearer <key> 头）
+xhs-cli --cookie-api http://your-server:8080/api/xhs --cookie-api-auth <密钥> whoami
+# 或用环境变量（对每条命令生效）
+export XHS_COOKIE_API=http://your-server:8080/api/xhs
+export XHS_COOKIE_API_AUTH=<密钥>
+```
+
+接口约定（CLI 侧只需实现这一个 GET）：
+
+| 请求 | 说明 |
+|---|---|
+| `GET {base}/cookies` | 返回账号列表，支持 `{"cookies": [{"id": 1, "cookie": "..."}]}`、`[{"id": ..., "cookie": ...}]` 或 `["cookie 字符串", ...]` 三种格式 |
+| `POST {base}/cookies/{id}/invalidate` | 账号 cookie 失效时 CLI 自动回调（带 id 的账号） |
+| `POST {base}/cookies/invalidate` | 同上，无 id 时回调，body 为 `{"cookie": "..."}` |
+
+所有请求在指定 `--cookie-api-auth` 时携带 `Authorization: Bearer <密钥>` 头（拉取与失效回调均携带）；鉴权失败（401）时命令直接报错退出。失效回调失败不影响当前请求（下次拉取仍会拿到该账号，由远端自行清理）。
+
 ### 2. 常用命令
 
 ```bash
@@ -117,7 +141,7 @@ xhs-cli search "咖啡" --json
 
 配置多个账号后自动轮询；遇到"登录已过期"（code -100）时：
 
-1. 提示并**自动从配置文件剔除**失效账号
+1. 提示并**自动剔除**失效账号（本地文件模式从配置文件删除；`--cookie-api` 模式回调远端 invalidate 接口）
 2. **自动换下一个有效账号重试**当前请求
 3. 全部账号失效则明确报错：`❌ 所有账号的 cookie 均已失效，请用 xhs-cli set-cookie '<新cookie>'`
 
@@ -134,6 +158,90 @@ xhs-cli search "咖啡" --json
 | `xhs-cli comments <链接或ID> [--xsec-token T] [--no-sub] [--max-sub-pages N]` | 笔记评论（含楼中楼） |
 | `xhs-cli user <user_id> [--notes N]` | 用户信息 + 前 N 条笔记 |
 | `xhs-cli user-notes <user_id> [--count N]` | 用户发布的笔记 |
+
+---
+
+## 🌐 HTTP 服务 (xhs-serve)
+
+把 `XHSClient` 封装成 FastAPI HTTP 服务，供其他语言/服务调用。**服务可做到完全无状态**：cookie 由调用方后端统一存储，每次请求通过请求体 `cookies` 字段传入；本层只负责签名与内容抓取。
+
+> 所有 `/api` 接口均为 **POST + JSON body**：cookie 与完整笔记链接等长参数放 body 传输，避免多账号 cookie 拼接超出 Header 大小限制（nginx 默认 8K、uvicorn/h11 约 16K），也免去 URL 转义问题。
+
+### 启动
+
+```bash
+# 安装 serve extra
+pip install "xhshow[serve] @ git+https://github.com/panjianning/xhshow.git"
+
+xhs-serve --host 0.0.0.0 --port 8080
+# 或
+uvicorn xhshow.server:app --host 0.0.0.0 --port 8080
+```
+
+启动后访问 `http://127.0.0.1:8080/docs` 查看交互式 API 文档。
+
+### Cookie 三种提供方式（优先级从高到低）
+
+| 方式 | 做法 | cookie 失效时 |
+|---|---|---|
+| **请求体（推荐）** | 请求体 `"cookies": ["<cookie串>", ...]`，每个元素一个账号，多账号参与轮询 | 返回 **401**，后端收到后更新存储的 cookie |
+| 请求头（兼容） | `X-XHS-Cookie: <cookie串>` 头，多个账号用 `;;` 分隔（单账号小 cookie 时方便） | 返回 **401** |
+| 服务端池（可选） | 环境变量 `XHS_COOKIES`（多账号，`;;` 或换行分隔）/ `XHS_COOKIE` / `XHS_COOKIE_API` / `~/.xhs-cli/cookie` | 返回 **503** |
+
+三种方式可共存：body `cookies` > 请求头 > 服务端池；服务端池不配置也能启动（纯请求级模式，body 和头都没传时返回 400）。
+
+设置环境变量 `XHS_API_KEY` 后，所有 `/api` 接口要求 `Authorization: Bearer <key>` 头。
+
+> 请求级 cookie 按内容去重缓存 `XHSClient` 实例（LRU，上限 64），失效自动从缓存剔除，同一 cookie 重复调用不会重建连接。
+
+### 接口列表
+
+所有 `/api` 接口均为 `POST`，参数放 JSON body；下表中 body 参数均含公共可选字段 `cookies`（请求体传 cookie，不传走服务端池）。
+
+| 接口 | body 参数（除 `cookies` 外） | 说明 |
+|---|---|---|
+| `GET /health` | -（无 body） | 健康检查（不带鉴权） |
+| `POST /api/whoami` | - | 当前登录账号信息 |
+| `POST /api/homefeed` | `count`(默认 20) | 首页推荐流 |
+| `POST /api/search` | `keyword`(必填) `limit` `page_size` `sort` `note_type` | 搜索笔记 |
+| `POST /api/detail` | `note`(必填，链接或 ID) `xsec_token` | 笔记详情（链接自动提取 xsec_token） |
+| `POST /api/comments` | `note`(必填) `xsec_token` `expand_sub` `max_sub_pages` | 笔记评论（含楼中楼） |
+| `POST /api/user/{user_id}` | `notes`(附带笔记数，0 不带) | 用户信息 |
+| `POST /api/user/{user_id}/notes` | `count`(默认 30) | 用户发布的笔记 |
+
+### 调用示例
+
+```bash
+# 搜索（请求体传 cookie）
+curl -X POST http://127.0.0.1:8080/api/search \
+     -H "Content-Type: application/json" \
+     -d '{"cookies": ["a1=...; web_session=...; webId=..."], "keyword": "咖啡", "limit": 5}'
+
+# 笔记详情（直接传完整链接，自动提取 xsec_token，链接无需 URL 转义）
+curl -X POST http://127.0.0.1:8080/api/detail \
+     -H "Content-Type: application/json" \
+     -d '{"cookies": ["a1=...; web_session=..."], "note": "https://www.xiaohongshu.com/explore/xxx?xsec_token=yyy"}'
+
+# 多账号轮询（cookies 数组，每个元素一个账号；不担心 Header 超长）
+curl -X POST http://127.0.0.1:8080/api/homefeed \
+     -H "Content-Type: application/json" \
+     -d '{"cookies": ["cookie_a的串", "cookie_b的串"], "count": 10}'
+```
+
+后端存储 cookie 的推荐用法：每次调用时从存储取出一个（或一组）cookie 放进 body 的 `cookies` 字段；收到 **401** 即认为该 cookie 已失效，从存储中移除/更新。
+
+### 错误码
+
+| 状态码 | 含义 |
+|---|---|
+| 400 | 参数错误（缺 cookie / 缺 xsec_token / 链接无法解析） |
+| 401 | 请求级 cookie 已失效（登录过期），或 API key 错误 |
+| 422 | body 参数校验失败（缺必填字段 / 数值超范围，FastAPI 标准 422 响应） |
+| 429 | 触发风控验证（HTTP 461），建议更换 cookie |
+| 503 | 服务端池的所有 cookie 均已失效 |
+| 502 | 上游请求失败（网络等） |
+
+> ⚠️ 全局限速 1.2s/请求（类级别共享，保护账号避免风控），并发请求会排队；需要更高吞吐请提供更多 cookie 账号。
 
 ---
 

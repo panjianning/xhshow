@@ -18,7 +18,17 @@ user-notes / whoami / set-cookie / cookie 命令, 支持 text 与 JSON (`--json`
     xhs-cli user <user_id> --notes 5
 
 cookie 加载优先级: ``--cookie`` > ``--cookie-file`` > 环境变量 ``XHS_COOKIE``
+> ``--cookie-api`` / 环境变量 ``XHS_COOKIE_API`` (远端接口)
 > ``~/.xhs-cli/cookie`` (每行一个 cookie = 一个账号, 由 set-cookie 追加写入)。
+
+远端 Cookie API 约定::
+
+    GET  {base}/cookies                    -> [{"id": 1, "cookie": "..."}, ...]
+    POST {base}/cookies/{id}/invalidate    -> 标记失效(cookie 带 id 时)
+    POST {base}/cookies/invalidate         -> 标记失效(无 id, body: {"cookie": "..."})
+
+接口需要鉴权时用 ``--cookie-api-auth <key>``(或环境变量 ``XHS_COOKIE_API_AUTH``),
+请求会带上 ``Authorization: Bearer <key>`` 头(拉取与失效回调均携带)。
 """
 
 from __future__ import annotations
@@ -144,14 +154,83 @@ def _remove_cookie_from_file(cookie: str) -> None:
     print(f"⚠️ 账号 cookie 已失效, 已自动移除: {_mask_cookie(cookie)} (剩余 {len(lines)} 个)", file=sys.stderr)
 
 
-def _build_client(cookies: list[str]) -> Any:
+def _api_headers(auth: str | None) -> dict[str, str]:
+    """Cookie API 的公共请求头(带鉴权时加 Bearer token)。"""
+    return {"Authorization": f"Bearer {auth}"} if auth else {}
+
+
+def _fetch_remote_cookies(api_base: str, auth: str | None = None) -> list[dict[str, Any]]:
+    """从远端 Cookie API 拉取账号列表。
+
+    ``GET {api_base}/cookies`` 需返回 JSON, 支持以下格式:
+    - ``{"cookies": [{"id": 1, "cookie": "..."}, ...]}``
+    - ``[{"id": 1, "cookie": "..."}, ...]``
+    - ``["cookie 字符串", ...]`` (无 id, 失效时按字符串匹配)
+
+    ``auth`` 非空时携带 ``Authorization: Bearer <auth>`` 头。
+    """
+    try:
+        import httpx
+    except ModuleNotFoundError as e:
+        if e.name == "httpx":
+            raise SystemExit("缺少依赖 httpx, 请安装: pip install 'xhshow[client]' 或 'xhshow[cli]'") from None
+        raise
+    url = api_base.rstrip("/") + "/cookies"
+    try:
+        resp = httpx.get(url, headers=_api_headers(auth), timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        raise SystemExit(f"从 Cookie API 拉取失败: {url} ({e})") from None
+    items = data.get("cookies") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        raise SystemExit(f"Cookie API 返回格式不符: {url} (期望 cookies 列表)")
+    accounts: list[dict[str, Any]] = []
+    for it in items:
+        if isinstance(it, str) and it.strip():
+            accounts.append({"id": None, "cookie": it.strip()})
+        elif isinstance(it, dict) and it.get("cookie"):
+            accounts.append({"id": it.get("id"), "cookie": it["cookie"]})
+    if not accounts:
+        raise SystemExit(f"Cookie API 返回空账号列表: {url}")
+    return accounts
+
+
+def _make_api_invalidate(api_base: str, accounts: list[dict[str, Any]], auth: str | None = None) -> Any:
+    """构造远端模式的 cookie 失效回调: 通知 API 标记该账号失效。
+
+    带 id 的账号回调 ``POST {base}/cookies/{id}/invalidate``;
+    无 id 时回调 ``POST {base}/cookies/invalidate``, body 为 {"cookie": "..."}。
+    网络异常不打断请求流程(下次拉取仍会拿到该账号, 由远端负责清理)。
+    """
+    id_map = {a["cookie"]: a["id"] for a in accounts}
+    base = api_base.rstrip("/")
+    headers = _api_headers(auth)
+
+    def _invalidate(cookie: str) -> None:
+        try:
+            import httpx
+
+            cid = id_map.get(cookie)
+            if cid is not None:
+                httpx.post(f"{base}/cookies/{cid}/invalidate", headers=headers, timeout=15)
+            else:
+                httpx.post(f"{base}/cookies/invalidate", json={"cookie": cookie}, headers=headers, timeout=15)
+        except Exception:
+            pass
+        print(f"⚠️ 账号 cookie 已失效, 已通知远端 API: {_mask_cookie(cookie)}", file=sys.stderr)
+
+    return _invalidate
+
+
+def _build_client(cookies: list[str], on_cookie_invalid: Any = None) -> Any:
     try:
         from .api import XHSClient
     except ModuleNotFoundError as e:
         if e.name == "httpx":
             raise SystemExit("缺少依赖 httpx, 请安装: pip install 'xhshow[client]' 或 'xhshow[cli]'") from None
         raise
-    return XHSClient(cookies, on_cookie_invalid=_remove_cookie_from_file)
+    return XHSClient(cookies, on_cookie_invalid=on_cookie_invalid or _remove_cookie_from_file)
 
 
 def _load_cookie_lines(path: Path) -> list[str]:
@@ -161,10 +240,13 @@ def _load_cookie_lines(path: Path) -> list[str]:
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
 
 
-def _resolve_cookie(args: argparse.Namespace) -> list[str]:
-    """返回 cookie 列表(多账号); 优先级: --cookie > --cookie-file > XHS_COOKIE > COOKIE_FILE。"""
+def _resolve_cookie(args: argparse.Namespace) -> tuple[list[str], Any]:
+    """返回 (cookie 列表, 失效回调或 None)。
+
+    优先级: --cookie > --cookie-file > XHS_COOKIE > --cookie-api / XHS_COOKIE_API > COOKIE_FILE。
+    """
     if args.cookie:
-        return [args.cookie]
+        return [args.cookie], None
     if args.cookie_file:
         p = Path(args.cookie_file)
         if not p.exists():
@@ -172,17 +254,22 @@ def _resolve_cookie(args: argparse.Namespace) -> list[str]:
         cookies = _load_cookie_lines(p)
         if not cookies:
             raise SystemExit(f"cookie 文件为空: {p}")
-        return cookies
+        return cookies, None
     env = os.environ.get("XHS_COOKIE")
     if env:
-        return [env]
+        return [env], None
+    api_base = getattr(args, "cookie_api", None) or os.environ.get("XHS_COOKIE_API")
+    if api_base:
+        api_auth = getattr(args, "cookie_api_auth", None) or os.environ.get("XHS_COOKIE_API_AUTH")
+        accounts = _fetch_remote_cookies(api_base, auth=api_auth)
+        return [a["cookie"] for a in accounts], _make_api_invalidate(api_base, accounts, auth=api_auth)
     cookies = _load_cookie_lines(COOKIE_FILE)
     if not cookies:
         raise SystemExit(
             "未找到 cookie。请先运行: xhs-cli set-cookie '<cookie>'\n"
-            "或通过 --cookie / --cookie-file / 环境变量 XHS_COOKIE 提供。"
+            "或通过 --cookie / --cookie-file / --cookie-api / 环境变量 XHS_COOKIE 提供。"
         )
-    return cookies
+    return cookies, None
 
 
 # ---------------------------------------------------------------------------
@@ -407,11 +494,27 @@ def build_parser() -> argparse.ArgumentParser:
     common_main = argparse.ArgumentParser(add_help=False)
     common_main.add_argument("--cookie", dest="cookie", help="Cookie 字符串")
     common_main.add_argument("--cookie-file", dest="cookie_file", help="从文件读取 Cookie")
+    common_main.add_argument(
+        "--cookie-api", dest="cookie_api", help="远端 Cookie API 地址(如 http://host:8080/api/xhs)"
+    )
+    common_main.add_argument(
+        "--cookie-api-auth",
+        dest="cookie_api_auth",
+        help="远端 Cookie API 的鉴权密钥(Authorization: Bearer <key>, 或环境变量 XHS_COOKIE_API_AUTH)",
+    )
     common_main.add_argument("--json", dest="json", action="store_true", help="以 JSON 格式输出")
 
     common_sub = argparse.ArgumentParser(add_help=False)
     common_sub.add_argument("--cookie", dest="sub_cookie", help="Cookie 字符串")
     common_sub.add_argument("--cookie-file", dest="sub_cookie_file", help="从文件读取 Cookie")
+    common_sub.add_argument(
+        "--cookie-api", dest="sub_cookie_api", help="远端 Cookie API 地址(如 http://host:8080/api/xhs)"
+    )
+    common_sub.add_argument(
+        "--cookie-api-auth",
+        dest="sub_cookie_api_auth",
+        help="远端 Cookie API 的鉴权密钥(Authorization: Bearer <key>)",
+    )
     common_sub.add_argument("--json", dest="sub_json", action="store_true", help="以 JSON 格式输出")
 
     parser = argparse.ArgumentParser(
@@ -477,6 +580,10 @@ def _merge_common(args: argparse.Namespace) -> None:
         args.cookie = args.sub_cookie
     if getattr(args, "sub_cookie_file", None):
         args.cookie_file = args.sub_cookie_file
+    if getattr(args, "sub_cookie_api", None):
+        args.cookie_api = args.sub_cookie_api
+    if getattr(args, "sub_cookie_api_auth", None):
+        args.cookie_api_auth = args.sub_cookie_api_auth
     if getattr(args, "sub_json", False):
         args.json = True
 
@@ -491,10 +598,10 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
 
     try:
-        cookies = _resolve_cookie(args)
+        cookies, on_invalid = _resolve_cookie(args)
         if not cookies:
             raise SystemExit("cookie 为空")
-        client = _build_client(cookies)
+        client = _build_client(cookies, on_cookie_invalid=on_invalid)
         args.func(args, client)
     except KeyboardInterrupt:
         print("(中断)", file=sys.stderr)
